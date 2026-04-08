@@ -1,0 +1,576 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+use HelgeSverre\LocalLlm\Backend\ModelOptions;
+use HelgeSverre\LocalLlm\Backend\SessionOptions;
+use HelgeSverre\LocalLlm\FFI\LlamaBackend;
+use HelgeSverre\LocalLlm\FFI\LlamaBackendConfig;
+use HelgeSverre\LocalLlm\Generation\GenerationConfig;
+use HelgeSverre\LocalLlm\Support\Statistics;
+
+$autoload = __DIR__ . '/../vendor/autoload.php';
+if (!is_file($autoload)) {
+    fwrite(STDERR, "Run `composer install` in local-llm-php before using the benchmark harness.\n");
+    exit(1);
+}
+
+require $autoload;
+
+$command = $argv[1] ?? 'suite';
+$options = parseOptions(array_slice($argv, 2));
+
+try {
+    match ($command) {
+        'suite' => runSuite($options),
+        'single-package' => runSinglePackage($options),
+        'single-package-worker' => runSinglePackageWorker($options),
+        'single-ollama' => runSingleOllama($options),
+        default => throw new InvalidArgumentException(sprintf('Unknown command "%s".', $command)),
+    };
+} catch (Throwable $exception) {
+    fwrite(STDERR, $exception->getMessage() . PHP_EOL);
+    exit(1);
+}
+
+/**
+ * @param array<string, string> $options
+ */
+function runSuite(array $options): void
+{
+    $libraryPath = requiredOption($options, 'library-path');
+    $ollamaModel = requiredOption($options, 'ollama-model');
+    $ollamaBaseUrl = rtrim($options['ollama-base-url'] ?? 'http://127.0.0.1:11434', '/');
+    $modelPath = $options['model-path'] ?? resolveModelPathFromOllama($ollamaModel);
+    $runs = (int) ($options['runs'] ?? '5');
+    $warmups = (int) ($options['warmups'] ?? '1');
+    $gpuLayers = (int) ($options['gpu-layers'] ?? '99');
+    $contextTokens = (int) ($options['context-tokens'] ?? '4096');
+    $batchSize = min($contextTokens, (int) ($options['batch-size'] ?? '1024'));
+    $microBatchSize = min($batchSize, (int) ($options['micro-batch-size'] ?? (string) $batchSize));
+    $threads = (int) ($options['threads'] ?? '0');
+    $batchThreads = (int) ($options['batch-threads'] ?? '0');
+    $flashAttention = ($options['flash-attention'] ?? '1') !== '0';
+    $offloadKqv = ($options['offload-kqv'] ?? '1') !== '0';
+    $keepAlive = $options['keep-alive'] ?? '0';
+    $warmKeepAlive = $options['warm-keep-alive'] ?? '10m';
+    $ollamaRaw = ($options['ollama-raw'] ?? '1') !== '0';
+    $cases = require __DIR__ . '/../tests/Benchmarks/cases.php';
+
+    $suite = [
+        'timestamp' => gmdate('c'),
+        'php' => PHP_VERSION,
+        'machine' => php_uname(),
+        'library_path' => $libraryPath,
+        'model_path' => $modelPath,
+        'ollama_model' => $ollamaModel,
+        'ollama_base_url' => $ollamaBaseUrl,
+        'runs' => $runs,
+        'warmups' => $warmups,
+        'ollama_raw' => $ollamaRaw,
+        'ollama_keep_alive' => $keepAlive,
+        'ollama_warm_keep_alive' => $warmKeepAlive,
+        'session_options' => [
+            'context_tokens' => $contextTokens,
+            'batch_size' => $batchSize,
+            'micro_batch_size' => $microBatchSize,
+            'threads' => $threads,
+            'batch_threads' => $batchThreads,
+            'flash_attention' => $flashAttention,
+            'offload_kqv' => $offloadKqv,
+        ],
+        'cases' => [],
+    ];
+
+    foreach ($cases as $case) {
+        $payload = [
+            'name' => $case['name'],
+            'prompt' => $case['prompt'],
+            'max_tokens' => $case['max_tokens'],
+            'library_path' => $libraryPath,
+            'model_path' => $modelPath,
+            'ollama_model' => $ollamaModel,
+            'gpu_layers' => $gpuLayers,
+            'context_tokens' => $contextTokens,
+            'batch_size' => $batchSize,
+            'micro_batch_size' => $microBatchSize,
+            'threads' => $threads,
+            'batch_threads' => $batchThreads,
+            'flash_attention' => $flashAttention ? '1' : '0',
+            'offload_kqv' => $offloadKqv ? '1' : '0',
+            'keep_alive' => $keepAlive,
+            'ollama_raw' => $ollamaRaw ? '1' : '0',
+            'ollama_base_url' => $ollamaBaseUrl,
+        ];
+
+        $warmPayload = array_merge($payload, [
+            'runs' => $runs,
+            'warmups' => $warmups,
+            'keep_alive' => $warmKeepAlive,
+        ]);
+
+        for ($index = 0; $index < $warmups; $index++) {
+            invokeSelf('single-package', $payload);
+            invokeSelf('single-ollama', $payload);
+        }
+
+        $packageRuns = [];
+        $ollamaRuns = [];
+
+        for ($index = 0; $index < $runs; $index++) {
+            $packageRuns[] = invokeSelf('single-package', $payload);
+            $ollamaRuns[] = invokeSelf('single-ollama', $payload);
+        }
+
+        $packageWarmWorker = invokeSelf('single-package-worker', $warmPayload);
+
+        $ollamaWarmRuns = [];
+        for ($index = 0; $index < $runs; $index++) {
+            $ollamaWarmRuns[] = invokeSelf('single-ollama', $warmPayload);
+        }
+
+        $suite['cases'][] = [
+            'name' => $case['name'],
+            'prompt_length' => strlen($case['prompt']),
+            'max_tokens' => $case['max_tokens'],
+            'package' => aggregateRuns($packageRuns),
+            'package_warm' => [
+                'worker_init_ms' => $packageWarmWorker['worker_init_ms'],
+                ...aggregateRuns($packageWarmWorker['runs']),
+            ],
+            'ollama' => aggregateRuns($ollamaRuns),
+            'ollama_warm' => aggregateRuns($ollamaWarmRuns),
+        ];
+    }
+
+    $outputPath = $options['output'] ?? defaultOutputPath('json');
+    $markdownPath = preg_replace('/\.json$/', '.md', $outputPath) ?: $outputPath . '.md';
+    @mkdir(dirname($outputPath), 0777, true);
+    file_put_contents($outputPath, json_encode($suite, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL);
+    file_put_contents($markdownPath, renderMarkdownReport($suite));
+
+    echo json_encode([
+        'json' => $outputPath,
+        'markdown' => $markdownPath,
+    ], JSON_UNESCAPED_SLASHES) . PHP_EOL;
+}
+
+/**
+ * @param array<string, string> $options
+ */
+function runSinglePackage(array $options): void
+{
+    $prompt = requiredOption($options, 'prompt');
+    $maxTokens = (int) requiredOption($options, 'max-tokens');
+    $modelPath = requiredOption($options, 'model-path');
+    $libraryPath = requiredOption($options, 'library-path');
+    $gpuLayers = (int) ($options['gpu-layers'] ?? '99');
+    $contextTokens = (int) ($options['context-tokens'] ?? '4096');
+    $batchSize = min($contextTokens, (int) ($options['batch-size'] ?? '1024'));
+    $microBatchSize = min($batchSize, (int) ($options['micro-batch-size'] ?? (string) $batchSize));
+    $threads = (int) ($options['threads'] ?? '0');
+    $batchThreads = (int) ($options['batch-threads'] ?? '0');
+    $flashAttention = ($options['flash-attention'] ?? '1') !== '0';
+    $offloadKqv = ($options['offload-kqv'] ?? '1') !== '0';
+
+    $start = hrtime(true);
+    $backend = new LlamaBackend(new LlamaBackendConfig($libraryPath));
+    $model = $backend->loadModel(new ModelOptions($modelPath, gpuLayers: $gpuLayers));
+    $session = $model->createSession(new SessionOptions(
+        contextTokens: $contextTokens,
+        batchSize: $batchSize,
+        microBatchSize: $microBatchSize,
+        threads: $threads,
+        batchThreads: $batchThreads,
+        flashAttention: $flashAttention,
+        offloadKqv: $offloadKqv,
+    ));
+    $loadUs = (int) ((hrtime(true) - $start) / 1_000);
+
+    $result = $session->generate(new GenerationConfig(
+        prompt: $prompt,
+        maxTokens: $maxTokens,
+        temperature: 0.0,
+    ));
+
+    $wallUs = (int) ((hrtime(true) - $start) / 1_000);
+
+    $payload = [
+        'backend' => 'package',
+        'case' => $options['name'] ?? 'adhoc',
+        'load_ms' => round($loadUs / 1000, 3),
+        'prompt_eval_ms' => round($result->profile->promptEvalDurationUs / 1000, 3),
+        'decode_ms' => round($result->profile->decodeDurationUs / 1000, 3),
+        'total_ms' => round($result->profile->totalDurationUs / 1000, 3),
+        'wall_ms' => round($wallUs / 1000, 3),
+        'prompt_tokens' => $result->profile->promptTokens,
+        'generated_tokens' => $result->profile->generatedTokens,
+        'prompt_tokens_per_sec' => round($result->profile->promptTokensPerSecond(), 3),
+        'decode_tokens_per_sec' => round($result->profile->decodeTokensPerSecond(), 3),
+        'finish_reason' => $result->finishReason,
+    ];
+
+    $session->close();
+    $model->close();
+
+    echo json_encode($payload, JSON_UNESCAPED_SLASHES) . PHP_EOL;
+}
+
+/**
+ * @param array<string, string> $options
+ */
+function runSinglePackageWorker(array $options): void
+{
+    $prompt = requiredOption($options, 'prompt');
+    $maxTokens = (int) requiredOption($options, 'max-tokens');
+    $modelPath = requiredOption($options, 'model-path');
+    $libraryPath = requiredOption($options, 'library-path');
+    $gpuLayers = (int) ($options['gpu-layers'] ?? '99');
+    $contextTokens = (int) ($options['context-tokens'] ?? '4096');
+    $runs = (int) ($options['runs'] ?? '5');
+    $warmups = (int) ($options['warmups'] ?? '1');
+    $batchSize = min($contextTokens, (int) ($options['batch-size'] ?? '1024'));
+    $microBatchSize = min($batchSize, (int) ($options['micro-batch-size'] ?? (string) $batchSize));
+
+    $initStart = hrtime(true);
+    $backend = new LlamaBackend(new LlamaBackendConfig($libraryPath));
+    $model = $backend->loadModel(new ModelOptions($modelPath, gpuLayers: $gpuLayers));
+    $session = $model->createSession(new SessionOptions(
+        contextTokens: $contextTokens,
+        batchSize: $batchSize,
+        microBatchSize: $microBatchSize,
+    ));
+    $workerInitMs = round(((hrtime(true) - $initStart) / 1_000) / 1000, 3);
+
+    $runOnce = static function () use ($session, $prompt, $maxTokens): array {
+        $session->reset();
+        $start = hrtime(true);
+        $result = $session->generate(new GenerationConfig(
+            prompt: $prompt,
+            maxTokens: $maxTokens,
+            temperature: 0.0,
+        ));
+        $wallUs = (int) ((hrtime(true) - $start) / 1_000);
+
+        return [
+            'backend' => 'package-warm',
+            'load_ms' => 0.0,
+            'prompt_eval_ms' => round($result->profile->promptEvalDurationUs / 1000, 3),
+            'decode_ms' => round($result->profile->decodeDurationUs / 1000, 3),
+            'total_ms' => round($result->profile->totalDurationUs / 1000, 3),
+            'wall_ms' => round($wallUs / 1000, 3),
+            'prompt_tokens' => $result->profile->promptTokens,
+            'generated_tokens' => $result->profile->generatedTokens,
+            'prompt_tokens_per_sec' => round($result->profile->promptTokensPerSecond(), 3),
+            'decode_tokens_per_sec' => round($result->profile->decodeTokensPerSecond(), 3),
+            'finish_reason' => $result->finishReason,
+        ];
+    };
+
+    for ($index = 0; $index < $warmups; $index++) {
+        $runOnce();
+    }
+
+    $runsPayload = [];
+    for ($index = 0; $index < $runs; $index++) {
+        $runsPayload[] = $runOnce();
+    }
+
+    $session->close();
+    $model->close();
+
+    echo json_encode([
+        'backend' => 'package-warm',
+        'case' => $options['name'] ?? 'adhoc',
+        'worker_init_ms' => $workerInitMs,
+        'runs' => $runsPayload,
+    ], JSON_UNESCAPED_SLASHES) . PHP_EOL;
+}
+
+/**
+ * @param array<string, string> $options
+ */
+function runSingleOllama(array $options): void
+{
+    $prompt = requiredOption($options, 'prompt');
+    $maxTokens = (int) requiredOption($options, 'max-tokens');
+    $model = requiredOption($options, 'ollama-model');
+    $ollamaBaseUrl = rtrim($options['ollama-base-url'] ?? 'http://127.0.0.1:11434', '/');
+    $contextTokens = (int) ($options['context-tokens'] ?? '4096');
+    $keepAlive = $options['keep-alive'] ?? '0';
+    $raw = ($options['ollama-raw'] ?? '1') !== '0';
+
+    $body = json_encode([
+        'model' => $model,
+        'prompt' => $prompt,
+        'raw' => $raw,
+        'stream' => false,
+        'keep_alive' => parseJsonScalar($keepAlive),
+        'options' => [
+            'num_predict' => $maxTokens,
+            'temperature' => 0,
+            'num_ctx' => $contextTokens,
+        ],
+    ], JSON_UNESCAPED_SLASHES);
+
+    $start = hrtime(true);
+    $context = stream_context_create([
+        'http' => [
+            'method' => 'POST',
+            'header' => "Content-Type: application/json\r\nContent-Length: " . strlen($body) . "\r\n",
+            'content' => $body,
+            'timeout' => 600,
+        ],
+    ]);
+
+    $response = @file_get_contents($ollamaBaseUrl . '/api/generate', false, $context);
+    if ($response === false) {
+        throw new RuntimeException(sprintf('Failed to call Ollama at %s/api/generate.', $ollamaBaseUrl));
+    }
+
+    /** @var array<string, mixed> $decoded */
+    $decoded = json_decode($response, true, flags: JSON_THROW_ON_ERROR);
+    $wallUs = (int) ((hrtime(true) - $start) / 1_000);
+
+    $promptEvalNs = (int) ($decoded['prompt_eval_duration'] ?? 0);
+    $evalNs = (int) ($decoded['eval_duration'] ?? 0);
+    $loadNs = (int) ($decoded['load_duration'] ?? 0);
+    $totalNs = (int) ($decoded['total_duration'] ?? 0);
+    $promptTokens = (int) ($decoded['prompt_eval_count'] ?? 0);
+    $generatedTokens = (int) ($decoded['eval_count'] ?? 0);
+
+    $payload = [
+        'backend' => 'ollama',
+        'case' => $options['name'] ?? 'adhoc',
+        'load_ms' => round($loadNs / 1_000_000, 3),
+        'prompt_eval_ms' => round($promptEvalNs / 1_000_000, 3),
+        'decode_ms' => round($evalNs / 1_000_000, 3),
+        'total_ms' => round($totalNs / 1_000_000, 3),
+        'wall_ms' => round($wallUs / 1000, 3),
+        'prompt_tokens' => $promptTokens,
+        'generated_tokens' => $generatedTokens,
+        'prompt_tokens_per_sec' => rate($promptTokens, $promptEvalNs),
+        'decode_tokens_per_sec' => rate($generatedTokens, $evalNs),
+        'finish_reason' => (string) ($decoded['done_reason'] ?? 'unknown'),
+    ];
+
+    echo json_encode($payload, JSON_UNESCAPED_SLASHES) . PHP_EOL;
+}
+
+/**
+ * @param array<string, string> $options
+ */
+function requiredOption(array $options, string $name): string
+{
+    if (!isset($options[$name]) || $options[$name] === '') {
+        throw new InvalidArgumentException(sprintf('Missing required option "--%s".', $name));
+    }
+
+    return $options[$name];
+}
+
+/**
+ * @param list<string> $arguments
+ * @return array<string, string>
+ */
+function parseOptions(array $arguments): array
+{
+    $options = [];
+    for ($index = 0, $count = count($arguments); $index < $count; $index++) {
+        $argument = $arguments[$index];
+        if (!str_starts_with($argument, '--')) {
+            continue;
+        }
+
+        $name = substr($argument, 2);
+        $value = $arguments[$index + 1] ?? '1';
+        if (!str_starts_with($value, '--')) {
+            $options[$name] = $value;
+            $index++;
+        } else {
+            $options[$name] = '1';
+        }
+    }
+
+    return $options;
+}
+
+/**
+ * @param array<string, mixed> $payload
+ * @return array<string, mixed>
+ */
+function invokeSelf(string $command, array $payload): array
+{
+    $escaped = [];
+    foreach ($payload as $key => $value) {
+        $escaped[] = '--' . str_replace('_', '-', $key);
+        $escaped[] = (string) $value;
+    }
+
+    $cmd = array_merge([PHP_BINARY, '-d', 'ffi.enable=1', __FILE__, $command], $escaped);
+    $spec = [
+        1 => ['pipe', 'w'],
+        2 => ['pipe', 'w'],
+    ];
+
+    $process = proc_open($cmd, $spec, $pipes);
+    if (!is_resource($process)) {
+        throw new RuntimeException(sprintf('Failed to start benchmark subprocess "%s".', $command));
+    }
+
+    $stdout = stream_get_contents($pipes[1]);
+    fclose($pipes[1]);
+    $stderr = stream_get_contents($pipes[2]);
+    fclose($pipes[2]);
+    $status = proc_close($process);
+
+    if ($status !== 0) {
+        throw new RuntimeException(trim($stderr) !== '' ? trim($stderr) : sprintf('Benchmark subprocess "%s" failed.', $command));
+    }
+
+    /** @var array<string, mixed> $decoded */
+    $decoded = json_decode(trim($stdout), true, flags: JSON_THROW_ON_ERROR);
+
+    return $decoded;
+}
+
+/**
+ * @param list<array<string, mixed>> $runs
+ * @return array<string, mixed>
+ */
+function aggregateRuns(array $runs): array
+{
+    return [
+        'runs' => $runs,
+        'load_ms' => Statistics::summarize(array_column($runs, 'load_ms')),
+        'prompt_eval_ms' => Statistics::summarize(array_column($runs, 'prompt_eval_ms')),
+        'decode_ms' => Statistics::summarize(array_column($runs, 'decode_ms')),
+        'total_ms' => Statistics::summarize(array_column($runs, 'total_ms')),
+        'wall_ms' => Statistics::summarize(array_column($runs, 'wall_ms')),
+        'prompt_tokens_per_sec' => Statistics::summarize(array_column($runs, 'prompt_tokens_per_sec')),
+        'decode_tokens_per_sec' => Statistics::summarize(array_column($runs, 'decode_tokens_per_sec')),
+        'prompt_tokens' => Statistics::summarize(array_column($runs, 'prompt_tokens')),
+        'generated_tokens' => Statistics::summarize(array_column($runs, 'generated_tokens')),
+    ];
+}
+
+function resolveModelPathFromOllama(string $model): string
+{
+    $output = shell_exec(sprintf('ollama show --modelfile %s 2>/dev/null', escapeshellarg($model)));
+    if (!is_string($output) || trim($output) === '') {
+        throw new RuntimeException(sprintf('Could not resolve a GGUF path from local Ollama model "%s". Pass --model-path explicitly.', $model));
+    }
+
+    foreach (explode("\n", $output) as $line) {
+        $line = trim($line);
+        if (str_starts_with($line, 'FROM /')) {
+            $path = substr($line, strlen('FROM '));
+            if (is_file($path)) {
+                return $path;
+            }
+        }
+    }
+
+    throw new RuntimeException(sprintf('Ollama model "%s" did not expose a local GGUF blob path. Pass --model-path explicitly.', $model));
+}
+
+function rate(int $tokens, int $durationNs): float
+{
+    if ($tokens === 0 || $durationNs <= 0) {
+        return 0.0;
+    }
+
+    return round($tokens / ($durationNs / 1_000_000_000), 3);
+}
+
+function parseJsonScalar(string $value): int|float|string|bool
+{
+    $normalized = strtolower($value);
+    if ($normalized === 'true') {
+        return true;
+    }
+
+    if ($normalized === 'false') {
+        return false;
+    }
+
+    if (preg_match('/^-?\d+$/', $value) === 1) {
+        return (int) $value;
+    }
+
+    if (preg_match('/^-?\d+\.\d+$/', $value) === 1) {
+        return (float) $value;
+    }
+
+    return $value;
+}
+
+function defaultOutputPath(string $extension): string
+{
+    return __DIR__ . '/../var/results/benchmark-' . gmdate('Ymd-His') . '.' . $extension;
+}
+
+/**
+ * @param array<string, mixed> $suite
+ */
+function renderMarkdownReport(array $suite): string
+{
+    $lines = [];
+    $lines[] = '# Benchmark Report';
+    $lines[] = '';
+    $lines[] = '- Timestamp: ' . $suite['timestamp'];
+    $lines[] = '- PHP: ' . $suite['php'];
+    $lines[] = '- Machine: `' . $suite['machine'] . '`';
+    $lines[] = '- Model path: `' . $suite['model_path'] . '`';
+    $lines[] = '- Ollama model: `' . $suite['ollama_model'] . '`';
+    $lines[] = '- Ollama raw prompts: `' . ($suite['ollama_raw'] ? 'true' : 'false') . '`';
+    $lines[] = '- Ollama keep_alive: `' . $suite['ollama_keep_alive'] . '`';
+    $lines[] = '- Ollama warm keep_alive: `' . $suite['ollama_warm_keep_alive'] . '`';
+    $lines[] = '- Package session options: `ctx=' . $suite['session_options']['context_tokens']
+        . ', batch=' . $suite['session_options']['batch_size']
+        . ', ubatch=' . $suite['session_options']['micro_batch_size']
+        . ', threads=' . $suite['session_options']['threads']
+        . ', batch_threads=' . $suite['session_options']['batch_threads']
+        . ', flash_attention=' . ($suite['session_options']['flash_attention'] ? 'true' : 'false')
+        . ', offload_kqv=' . ($suite['session_options']['offload_kqv'] ? 'true' : 'false') . '`';
+    $lines[] = '';
+
+    foreach ($suite['cases'] as $case) {
+        $lines[] = '## ' . $case['name'];
+        $lines[] = '';
+        $lines[] = '| Backend | Prompt eval median (ms) | Decode median (t/s) | Total median (ms) | Wall median (ms) |';
+        $lines[] = '| --- | ---: | ---: | ---: | ---: |';
+        $lines[] = sprintf(
+            '| package cold | %.3f | %.3f | %.3f | %.3f |',
+            $case['package']['prompt_eval_ms']['median'],
+            $case['package']['decode_tokens_per_sec']['median'],
+            $case['package']['total_ms']['median'],
+            $case['package']['wall_ms']['median'],
+        );
+        $lines[] = sprintf(
+            '| package warm | %.3f | %.3f | %.3f | %.3f |',
+            $case['package_warm']['prompt_eval_ms']['median'],
+            $case['package_warm']['decode_tokens_per_sec']['median'],
+            $case['package_warm']['total_ms']['median'],
+            $case['package_warm']['wall_ms']['median'],
+        );
+        $lines[] = sprintf(
+            '| ollama cold | %.3f | %.3f | %.3f | %.3f |',
+            $case['ollama']['prompt_eval_ms']['median'],
+            $case['ollama']['decode_tokens_per_sec']['median'],
+            $case['ollama']['total_ms']['median'],
+            $case['ollama']['wall_ms']['median'],
+        );
+        $lines[] = sprintf(
+            '| ollama warm | %.3f | %.3f | %.3f | %.3f |',
+            $case['ollama_warm']['prompt_eval_ms']['median'],
+            $case['ollama_warm']['decode_tokens_per_sec']['median'],
+            $case['ollama_warm']['total_ms']['median'],
+            $case['ollama_warm']['wall_ms']['median'],
+        );
+        $lines[] = '';
+    }
+
+    return implode(PHP_EOL, $lines) . PHP_EOL;
+}

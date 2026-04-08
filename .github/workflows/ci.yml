@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - 'codex/**'
+  pull_request:
+
+jobs:
+  unit-and-build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: ffi
+          coverage: none
+
+      - uses: ramsey/composer-install@v3
+
+      - name: Build llama.cpp
+        run: ./scripts/build-llama-cpp.sh
+
+      - name: Unit tests
+        run: ./vendor/bin/phpunit --testsuite unit
+
+      - name: Doctor smoke
+        run: php -d ffi.enable=1 ./bin/doctor

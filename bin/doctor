@@ -1,0 +1,114 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+use HelgeSverre\LocalLlm\LocalLlm;
+use HelgeSverre\LocalLlm\Runtime\LlamaRuntime;
+use HelgeSverre\LocalLlm\Support\SupportedModelProfile;
+use HelgeSverre\LocalLlm\Support\OllamaModelResolver;
+
+$autoload = __DIR__ . '/../vendor/autoload.php';
+if (!is_file($autoload)) {
+    fwrite(STDERR, "Run `composer install` in local-llm-php before using the doctor.\n");
+    exit(1);
+}
+
+require $autoload;
+
+$options = parseOptions(array_slice($argv, 1));
+$libraryPath = $options['library-path'] ?? null;
+$modelPath = $options['model-path'] ?? null;
+$ollamaModel = $options['ollama-model'] ?? null;
+$inspectModel = ($options['inspect-model'] ?? '0') !== '0';
+$listSupportedModels = ($options['list-supported-models'] ?? '0') !== '0';
+
+$report = LocalLlm::inspectLlamaCppEnvironment($libraryPath);
+
+echo "Environment\n";
+echo "Library: " . $report->libraryPath . PHP_EOL;
+echo "Blocking issues: " . ($report->hasBlockingIssues() ? 'yes' : 'no') . PHP_EOL;
+
+foreach ($report->issues as $issue) {
+    echo strtoupper($issue->severity) . ': ' . $issue->message . PHP_EOL;
+}
+
+if ($listSupportedModels) {
+    echo PHP_EOL . "Supported models\n";
+
+    foreach (LocalLlm::supportedModels() as $profile) {
+        printSupportedModel($profile);
+    }
+}
+
+if ($ollamaModel !== null) {
+    $resolver = new OllamaModelResolver();
+    $modelPath = $resolver->resolveBlobPath($ollamaModel);
+    echo "Resolved Ollama model: {$ollamaModel}" . PHP_EOL;
+    echo "Resolved GGUF path: {$modelPath}" . PHP_EOL;
+}
+
+if ($modelPath === null || $report->hasBlockingIssues() || !$inspectModel) {
+    exit($report->hasBlockingIssues() ? 1 : 0);
+}
+
+$runtime = null;
+try {
+    $runtime = LlamaRuntime::fromModelPath(
+        modelPath: $modelPath,
+        libraryPath: $libraryPath,
+        gpuLayers: isset($options['gpu-layers']) ? (int) $options['gpu-layers'] : 99,
+    );
+    $metadata = $runtime->metadata();
+
+    echo PHP_EOL . "Model\n";
+    echo "Description: {$metadata->description}" . PHP_EOL;
+    echo "Vocab size: {$metadata->vocabSize}" . PHP_EOL;
+    echo "Training context: {$metadata->trainingContextSize}" . PHP_EOL;
+    echo "Layers: {$metadata->layerCount}" . PHP_EOL;
+    echo "Parameters: {$metadata->parameterCount}" . PHP_EOL;
+    echo "Model size bytes: {$metadata->modelSizeBytes}" . PHP_EOL;
+} finally {
+    $runtime?->close();
+}
+
+/**
+ * @param list<string> $arguments
+ * @return array<string, string>
+ */
+function parseOptions(array $arguments): array
+{
+    $options = [];
+    for ($index = 0, $count = count($arguments); $index < $count; $index++) {
+        $argument = $arguments[$index];
+        if (!str_starts_with($argument, '--')) {
+            continue;
+        }
+
+        $name = substr($argument, 2);
+        $value = $arguments[$index + 1] ?? '1';
+        if (!str_starts_with($value, '--')) {
+            $options[$name] = $value;
+            $index++;
+        } else {
+            $options[$name] = '1';
+        }
+    }
+
+    return $options;
+}
+
+function printSupportedModel(SupportedModelProfile $profile): void
+{
+    echo "- {$profile->id}: {$profile->label}" . PHP_EOL;
+    echo "  Source: {$profile->source} ({$profile->sourceReference})" . PHP_EOL;
+    echo "  Artifact: {$profile->artifact}" . PHP_EOL;
+    echo "  Quantization: {$profile->quantization}" . PHP_EOL;
+    echo "  Minimum unified memory: {$profile->minimumUnifiedMemoryGb} GB" . PHP_EOL;
+
+    foreach ($profile->supportedTiers() as $tier) {
+        $preset = $profile->preset($tier);
+        $session = $preset->sessionOptions;
+        echo "  Preset {$tier->value}: ctx={$session->contextTokens}, batch={$session->batchSize}, ubatch={$session->microBatchSize}, gpuLayers={$preset->gpuLayers}" . PHP_EOL;
+    }
+}

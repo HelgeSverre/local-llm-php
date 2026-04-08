@@ -1,0 +1,6 @@
+/vendor/
+/.phpunit.cache/
+/.DS_Store
+/var/results/
+/var/native/llama.cpp/
+/var/native/*.tar.gz

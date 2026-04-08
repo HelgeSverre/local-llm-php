@@ -1,0 +1,57 @@
+{
+  "name": "helgesverre/local-llm-php",
+  "description": "Standalone local llama.cpp runtime for PHP via FFI with GGUF support, streaming, and profiling.",
+  "type": "library",
+  "license": "MIT",
+  "authors": [
+    {
+      "name": "Helge Sverre"
+    }
+  ],
+  "homepage": "https://github.com/helgesverre/local-llm-php",
+  "keywords": [
+    "php",
+    "ffi",
+    "llama.cpp",
+    "local-llm",
+    "gguf",
+    "ollama"
+  ],
+  "support": {
+    "issues": "https://github.com/helgesverre/local-llm-php/issues",
+    "source": "https://github.com/helgesverre/local-llm-php"
+  },
+  "require": {
+    "php": "^8.3",
+    "ext-ffi": "*",
+    "ext-json": "*",
+    "psr/log": "^3.0"
+  },
+  "require-dev": {
+    "phpunit/phpunit": "^11.5"
+  },
+  "autoload": {
+    "psr-4": {
+      "HelgeSverre\\LocalLlm\\": "src/"
+    }
+  },
+  "autoload-dev": {
+    "psr-4": {
+      "HelgeSverre\\LocalLlm\\Tests\\": "tests/"
+    }
+  },
+  "bin": [
+    "bin/benchmark",
+    "bin/doctor"
+  ],
+  "scripts": {
+    "test": "vendor/bin/phpunit",
+    "test:unit": "vendor/bin/phpunit --testsuite unit",
+    "test:integration": "vendor/bin/phpunit --testsuite integration",
+    "test:smoke": "bash scripts/smoke-install.sh",
+    "test:smoke:docker": "bash scripts/smoke-linux-docker.sh",
+    "benchmark": "php bin/benchmark"
+  },
+  "minimum-stability": "stable",
+  "prefer-stable": true
+}
