@@ -11,6 +11,11 @@ final class RuntimePlatform
         return 'libllama.' . self::sharedLibraryExtension($osFamily);
     }
 
+    public static function multimodalSharedLibraryBasename(?string $osFamily = null): string
+    {
+        return 'libmtmd.' . self::sharedLibraryExtension($osFamily);
+    }
+
     public static function sharedLibraryExtension(?string $osFamily = null): string
     {
         return match (self::osFamily($osFamily)) {

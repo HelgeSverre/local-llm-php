@@ -32,4 +32,9 @@ final class LlamaBackend implements BackendInterface
     {
         return dirname(__DIR__, 2) . '/var/native/llama.cpp/build/bin/' . RuntimePlatform::sharedLibraryBasename();
     }
+
+    public static function defaultMultimodalLibraryPath(): string
+    {
+        return dirname(__DIR__, 2) . '/var/native/llama.cpp/build/bin/' . RuntimePlatform::multimodalSharedLibraryBasename();
+    }
 }

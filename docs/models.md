@@ -20,9 +20,10 @@ Best-supported use cases right now:
 
 - `llama.cpp` is the only implemented backend.
 - serialized session snapshot/restore is still experimental on the current Metal setup
+- serialized snapshot/restore after multimodal prompt evaluation is rejected explicitly on the current Darwin/Metal path because the native restore path is not stable there yet
 - no grammar-constrained decoding API yet
 - no LoRA adapter management API yet
-- no multimodal abstraction at the PHP layer yet
+- multimodal support currently requires a separate `mmproj` file supported by upstream `llama.cpp`
 - no robust persistent-worker/server mode yet
 
 ### Model-selection limitations
@@ -33,6 +34,7 @@ Best-supported use cases right now:
 - large context settings can consume substantial unified memory on Apple Silicon
 - quantization choice affects both decode speed and response quality
 - Linux CPU inference is much more sensitive to model size than Apple Silicon Metal offload
+- single-file multimodal GGUF blobs such as Ollama's combined Gemma 4 packages are not supported yet; use split text-model plus `mmproj` artifacts
 
 ## Recommended acquisition paths
 
@@ -140,6 +142,38 @@ $runtime = LocalLlm::llamaCppRuntime(
     gpuLayers: $profile->recommendedGpuLayers(AppleSiliconTier::GB16),
 );
 ```
+
+### From a split multimodal model plus `mmproj`
+
+```php
+use HelgeSverre\LocalLlm\Chat\ChatMessage;
+use HelgeSverre\LocalLlm\Generation\GenerationConfig;
+use HelgeSverre\LocalLlm\Generation\MediaInput;
+use HelgeSverre\LocalLlm\LocalLlm;
+
+$runtime = LocalLlm::llamaCppRuntime(
+    modelPath: '/absolute/path/to/model.gguf',
+    multimodalProjectorPath: '/absolute/path/to/mmproj.gguf',
+);
+
+$chat = $runtime->newChatSession();
+
+$result = $chat->generate(
+    [
+        ChatMessage::userWithMedia(
+            'Describe this image in one sentence.',
+            [MediaInput::fromFile('/absolute/path/to/image.jpg')],
+        ),
+    ],
+    new GenerationConfig(maxTokens: 64, temperature: 0.0),
+);
+```
+
+Notes:
+
+- For chat sessions, attach media to `ChatMessage` so the package can place media markers consistently.
+- For low-level raw prompts, use `GenerationConfig->mediaInputs` and include the exact number of media markers in the prompt yourself.
+- Do not mix message-attached media and `GenerationConfig->mediaInputs` in the same chat request.
 
 ### Resolve and inspect with the doctor CLI
 

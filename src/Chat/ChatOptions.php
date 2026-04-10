@@ -12,6 +12,5 @@ final readonly class ChatOptions
         public ?string $templateOverride = null,
         public ?string $promptOverride = null,
         public ?ChatFormatterInterface $formatterOverride = null,
-    ) {
-    }
+    ) {}
 }

@@ -4,14 +4,14 @@ declare(strict_types=1);
 
 namespace HelgeSverre\LocalLlm\Runtime;
 
-use HelgeSverre\LocalLlm\Chat\ChatFormatterInterface;
-use HelgeSverre\LocalLlm\Chat\ChatSession;
-use HelgeSverre\LocalLlm\Chat\DefaultChatFormatter;
 use HelgeSverre\LocalLlm\Backend\ModelInterface;
 use HelgeSverre\LocalLlm\Backend\ModelMetadata;
 use HelgeSverre\LocalLlm\Backend\ModelOptions;
 use HelgeSverre\LocalLlm\Backend\SessionInterface;
 use HelgeSverre\LocalLlm\Backend\SessionOptions;
+use HelgeSverre\LocalLlm\Chat\ChatFormatterInterface;
+use HelgeSverre\LocalLlm\Chat\ChatSession;
+use HelgeSverre\LocalLlm\Chat\DefaultChatFormatter;
 use HelgeSverre\LocalLlm\FFI\LlamaBackend;
 use HelgeSverre\LocalLlm\FFI\LlamaBackendConfig;
 use HelgeSverre\LocalLlm\Support\EnvironmentChecker;
@@ -27,15 +27,13 @@ final class LlamaRuntime
     private bool $closed = false;
 
     private function __construct(
-        private readonly LlamaBackend $backend,
         private readonly ModelInterface $model,
         private readonly SessionOptions $defaultSessionOptions,
         private readonly EnvironmentReport $environmentReport,
         private readonly string $resolvedModelPath,
         private readonly ChatFormatterInterface $defaultChatFormatter,
         private readonly LoggerInterface $logger,
-    ) {
-    }
+    ) {}
 
     public static function fromModelPath(
         string $modelPath,
@@ -46,8 +44,23 @@ final class LlamaRuntime
         ?LoggerInterface $logger = null,
         bool $captureNativeLogs = true,
         string $nativeLogLevel = LogLevel::WARNING,
+        ?string $multimodalProjectorPath = null,
+        bool $multimodalProjectorUseGpu = true,
     ): self {
-        $libraryPath ??= LlamaBackend::defaultLibraryPath();
+        $libraryPath ??= $multimodalProjectorPath !== null
+            ? LlamaBackend::defaultMultimodalLibraryPath()
+            : LlamaBackend::defaultLibraryPath();
+
+        if (
+            $multimodalProjectorPath !== null
+            && basename($libraryPath) === RuntimePlatform::sharedLibraryBasename()
+        ) {
+            $candidateMtmdPath = dirname($libraryPath) . '/' . RuntimePlatform::multimodalSharedLibraryBasename();
+            if (is_file($candidateMtmdPath)) {
+                $libraryPath = $candidateMtmdPath;
+            }
+        }
+
         $logger ??= new NullLogger();
         $gpuLayers ??= RuntimePlatform::defaultGpuLayers();
         $environmentReport = EnvironmentChecker::inspectForLlamaCpp($libraryPath);
@@ -62,10 +75,11 @@ final class LlamaRuntime
         $model = $backend->loadModel(new ModelOptions(
             modelPath: $modelPath,
             gpuLayers: $gpuLayers,
+            multimodalProjectorPath: $multimodalProjectorPath,
+            multimodalProjectorUseGpu: $multimodalProjectorUseGpu,
         ));
 
         return new self(
-            backend: $backend,
             model: $model,
             defaultSessionOptions: $sessionOptions ?? new SessionOptions(),
             environmentReport: $environmentReport,
@@ -85,6 +99,8 @@ final class LlamaRuntime
         ?LoggerInterface $logger = null,
         bool $captureNativeLogs = true,
         string $nativeLogLevel = LogLevel::WARNING,
+        ?string $multimodalProjectorPath = null,
+        bool $multimodalProjectorUseGpu = true,
     ): self {
         $resolver ??= new OllamaModelResolver();
         $modelPath = $resolver->resolveBlobPath($ollamaModel);
@@ -94,6 +110,8 @@ final class LlamaRuntime
             libraryPath: $libraryPath,
             gpuLayers: $gpuLayers,
             sessionOptions: $sessionOptions,
+            multimodalProjectorPath: $multimodalProjectorPath,
+            multimodalProjectorUseGpu: $multimodalProjectorUseGpu,
             chatFormatter: $chatFormatter,
             logger: $logger,
             captureNativeLogs: $captureNativeLogs,

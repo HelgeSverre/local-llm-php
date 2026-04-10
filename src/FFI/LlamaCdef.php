@@ -34,6 +34,9 @@ struct llama_vocab;
 struct llama_model;
 struct llama_context;
 struct llama_sampler;
+struct mtmd_context;
+struct mtmd_bitmap;
+struct mtmd_input_chunks;
 struct llama_model_kv_override;
 struct llama_model_tensor_buft_override;
 struct llama_sampler_seq_config;
@@ -41,6 +44,7 @@ struct llama_sampler_seq_config;
 typedef int32_t llama_pos;
 typedef int32_t llama_token;
 typedef int32_t llama_seq_id;
+typedef int mtmd_input_chunk_type;
 
 typedef bool (*llama_progress_callback)(float progress, void * user_data);
 typedef bool (*ggml_abort_callback)(void * user_data);
@@ -111,6 +115,12 @@ typedef struct llama_chat_message {
     const char * content;
 } llama_chat_message;
 
+typedef struct mtmd_input_text {
+    const char * text;
+    bool add_special;
+    bool parse_special;
+} mtmd_input_text;
+
 typedef struct llama_batch {
     int32_t n_tokens;
     llama_token * token;
@@ -136,6 +146,20 @@ struct llama_perf_sampler_data {
     int32_t n_sample;
 };
 
+struct mtmd_context_params {
+    bool use_gpu;
+    bool print_timings;
+    int n_threads;
+    const char * image_marker;
+    const char * media_marker;
+    int flash_attn_type;
+    bool warmup;
+    int image_min_tokens;
+    int image_max_tokens;
+    ggml_backend_sched_eval_callback cb_eval;
+    void * cb_eval_user_data;
+};
+
 void ggml_backend_load_all(void);
 
 struct llama_model_params llama_model_default_params(void);
@@ -146,6 +170,36 @@ void llama_backend_free(void);
 void llama_numa_init(ggml_numa_strategy numa);
 int64_t llama_time_us(void);
 void llama_log_set(ggml_log_callback log_callback, void * user_data);
+const char * mtmd_default_marker(void);
+struct mtmd_context_params mtmd_context_params_default(void);
+struct mtmd_context * mtmd_init_from_file(const char * mmproj_fname, const struct llama_model * text_model, const struct mtmd_context_params ctx_params);
+void mtmd_free(struct mtmd_context * ctx);
+bool mtmd_support_vision(struct mtmd_context * ctx);
+bool mtmd_support_audio(struct mtmd_context * ctx);
+int mtmd_get_audio_sample_rate(struct mtmd_context * ctx);
+struct mtmd_bitmap * mtmd_helper_bitmap_init_from_file(struct mtmd_context * ctx, const char * fname);
+void mtmd_bitmap_free(struct mtmd_bitmap * bitmap);
+void mtmd_bitmap_set_id(struct mtmd_bitmap * bitmap, const char * id);
+struct mtmd_input_chunks * mtmd_input_chunks_init(void);
+void mtmd_input_chunks_free(struct mtmd_input_chunks * chunks);
+int32_t mtmd_tokenize(
+    struct mtmd_context * ctx,
+    struct mtmd_input_chunks * output,
+    const mtmd_input_text * text,
+    const struct mtmd_bitmap ** bitmaps,
+    size_t n_bitmaps
+);
+int32_t mtmd_helper_eval_chunks(
+    struct mtmd_context * ctx,
+    struct llama_context * lctx,
+    const struct mtmd_input_chunks * chunks,
+    llama_pos n_past,
+    llama_seq_id seq_id,
+    int32_t n_batch,
+    bool logits_last,
+    llama_pos * new_n_past
+);
+size_t mtmd_helper_get_n_tokens(const struct mtmd_input_chunks * chunks);
 
 struct llama_model * llama_model_load_from_file(const char * path_model, struct llama_model_params params);
 void llama_model_free(struct llama_model * model);

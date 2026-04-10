@@ -12,6 +12,7 @@ final readonly class SessionState
     public function __construct(
         public string $bytes,
         public array $historyTokenIds,
-    ) {
-    }
+        public ?int $historyPositionCount = null,
+        public bool $containsMultimodalPromptState = false,
+    ) {}
 }

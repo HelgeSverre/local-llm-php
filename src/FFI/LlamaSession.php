@@ -7,16 +7,19 @@ namespace HelgeSverre\LocalLlm\FFI;
 use FFI\CData;
 use Generator;
 use HelgeSverre\LocalLlm\Backend\BackendException;
+use HelgeSverre\LocalLlm\Backend\MediaAwareSessionInterface;
 use HelgeSverre\LocalLlm\Backend\SessionInterface;
 use HelgeSverre\LocalLlm\Backend\SessionOptions;
 use HelgeSverre\LocalLlm\Generation\GenerationConfig;
 use HelgeSverre\LocalLlm\Generation\GenerationProfile;
 use HelgeSverre\LocalLlm\Generation\GenerationResult;
+use HelgeSverre\LocalLlm\Generation\MediaInput;
 use HelgeSverre\LocalLlm\Generation\PromptEvaluationResult;
 use HelgeSverre\LocalLlm\Generation\SessionState;
 use HelgeSverre\LocalLlm\Generation\TokenChunk;
+use HelgeSverre\LocalLlm\Support\RuntimePlatform;
 
-final class LlamaSession implements SessionInterface
+final class LlamaSession implements SessionInterface, MediaAwareSessionInterface
 {
     private const FINISH_MAX_TOKENS = 'max_tokens';
     private const FINISH_STOP_TOKEN = 'stop_token';
@@ -24,12 +27,14 @@ final class LlamaSession implements SessionInterface
     private const FINISH_EOG = 'end_of_generation';
 
     private CData $context;
+    private ?CData $multimodalContext = null;
     private bool $closed = false;
+    private int $historyPositionCount = 0;
+    private string $mediaMarker = MediaInput::DEFAULT_MARKER;
+    private bool $containsMultimodalPromptState = false;
 
     /** @var list<int> */
     private array $historyTokenIds = [];
-
-    private ?PromptEvaluationResult $lastPromptEvaluation = null;
 
     public function __construct(
         private readonly LlamaLibrary $library,
@@ -58,6 +63,8 @@ final class LlamaSession implements SessionInterface
             $ffi->llama_set_n_threads($this->context, $options->threads, $options->batchThreads);
         }
 
+        $this->initializeMultimodalContext();
+
         $this->library->logger()->debug('Created llama.cpp session.', [
             'context_tokens' => $options->contextTokens,
             'batch_size' => $options->batchSize,
@@ -81,10 +88,7 @@ final class LlamaSession implements SessionInterface
             : array_values($prompt);
 
         if ($tokenIds === []) {
-            $result = new PromptEvaluationResult([], 0, 0);
-            $this->lastPromptEvaluation = $result;
-
-            return $result;
+            return new PromptEvaluationResult([], 0, 0);
         }
 
         $ffi = $this->library->ffi();
@@ -121,10 +125,12 @@ final class LlamaSession implements SessionInterface
             }
 
             $this->historyTokenIds[] = $decoderStartToken;
+            $this->historyPositionCount++;
         }
 
         $durationUs = (int) ((hrtime(true) - $start) / 1_000);
         array_push($this->historyTokenIds, ...$tokenIds);
+        $this->historyPositionCount += count($tokenIds);
 
         $this->library->logger()->debug('Evaluated prompt.', [
             'prompt_tokens' => count($tokenIds),
@@ -133,10 +139,7 @@ final class LlamaSession implements SessionInterface
             'chunked' => $chunkCount > 1,
         ]);
 
-        $result = new PromptEvaluationResult($tokenIds, count($tokenIds), $durationUs);
-        $this->lastPromptEvaluation = $result;
-
-        return $result;
+        return new PromptEvaluationResult($tokenIds, count($tokenIds), $durationUs);
     }
 
     public function generate(GenerationConfig $config, ?callable $onToken = null): GenerationResult
@@ -146,14 +149,16 @@ final class LlamaSession implements SessionInterface
         $ffi = $this->library->ffi();
         $ffi->llama_perf_context_reset($this->context);
 
-        $promptEvaluation = null;
-        if ($config->prompt !== null) {
-            $promptEvaluation = $this->evaluate($config->prompt, $config->addSpecial, $config->parseSpecial);
-        } else {
-            $this->lastPromptEvaluation = null;
+        if ($config->prompt === null && $config->mediaInputs !== []) {
+            throw new BackendException('Media inputs require a prompt string in the current generation call.');
         }
 
-        if ($this->historyTokenIds === []) {
+        $promptEvaluation = null;
+        if ($config->prompt !== null) {
+            $promptEvaluation = $this->evaluatePrompt($config);
+        }
+
+        if ($this->historyPositionCount === 0) {
             throw new BackendException('Generation requires a prompt or a previously evaluated session state.');
         }
 
@@ -188,6 +193,7 @@ final class LlamaSession implements SessionInterface
                 $generatedText .= $piece;
                 $generatedTokenIds[] = $tokenId;
                 $this->historyTokenIds[] = $tokenId;
+                $this->historyPositionCount++;
 
                 $chunk = new TokenChunk($tokenId, $piece, $index, (int) ((hrtime(true) - $start) / 1_000));
                 $chunks[] = $chunk;
@@ -261,6 +267,7 @@ final class LlamaSession implements SessionInterface
     public function snapshot(): SessionState
     {
         $this->assertOpen();
+        $this->assertSerializedStateSupported($this->containsMultimodalPromptState);
 
         $ffi = $this->library->ffi();
         $size = (int) $ffi->llama_state_get_size($this->context);
@@ -274,12 +281,15 @@ final class LlamaSession implements SessionInterface
         return new SessionState(
             bytes: $this->library->string($this->library->cast('char *', $buffer), $written),
             historyTokenIds: $this->historyTokenIds,
+            historyPositionCount: $this->historyPositionCount,
+            containsMultimodalPromptState: $this->containsMultimodalPromptState,
         );
     }
 
     public function restore(SessionState $state): void
     {
         $this->assertOpen();
+        $this->assertSerializedStateSupported($state->containsMultimodalPromptState);
         $this->reset();
 
         $ffi = $this->library->ffi();
@@ -295,6 +305,8 @@ final class LlamaSession implements SessionInterface
         }
 
         $this->historyTokenIds = $state->historyTokenIds;
+        $this->historyPositionCount = $state->historyPositionCount ?? count($state->historyTokenIds);
+        $this->containsMultimodalPromptState = $state->containsMultimodalPromptState;
     }
 
     public function reset(bool $clearStateData = true): void
@@ -306,7 +318,8 @@ final class LlamaSession implements SessionInterface
         $ffi->llama_memory_clear($memory, $clearStateData);
         $ffi->llama_perf_context_reset($this->context);
         $this->historyTokenIds = [];
-        $this->lastPromptEvaluation = null;
+        $this->historyPositionCount = 0;
+        $this->containsMultimodalPromptState = false;
     }
 
     public function close(): void
@@ -315,8 +328,18 @@ final class LlamaSession implements SessionInterface
             return;
         }
 
+        if ($this->multimodalContext !== null && !$this->library->isNull($this->multimodalContext)) {
+            $this->library->ffi()->mtmd_free($this->multimodalContext);
+            $this->multimodalContext = null;
+        }
+
         $this->library->ffi()->llama_free($this->context);
         $this->closed = true;
+    }
+
+    public function mediaMarker(): ?string
+    {
+        return $this->multimodalContext !== null ? $this->mediaMarker : null;
     }
 
     /**
@@ -329,14 +352,16 @@ final class LlamaSession implements SessionInterface
         $ffi = $this->library->ffi();
         $ffi->llama_perf_context_reset($this->context);
 
-        $promptEvaluation = null;
-        if ($config->prompt !== null) {
-            $promptEvaluation = $this->evaluate($config->prompt, $config->addSpecial, $config->parseSpecial);
-        } else {
-            $this->lastPromptEvaluation = null;
+        if ($config->prompt === null && $config->mediaInputs !== []) {
+            throw new BackendException('Media inputs require a prompt string in the current generation call.');
         }
 
-        if ($this->historyTokenIds === []) {
+        $promptEvaluation = null;
+        if ($config->prompt !== null) {
+            $promptEvaluation = $this->evaluatePrompt($config);
+        }
+
+        if ($this->historyPositionCount === 0) {
             throw new BackendException('Generation requires a prompt or a previously evaluated session state.');
         }
 
@@ -370,6 +395,7 @@ final class LlamaSession implements SessionInterface
                 $generatedText .= $piece;
                 $generatedTokenIds[] = $tokenId;
                 $this->historyTokenIds[] = $tokenId;
+                $this->historyPositionCount++;
 
                 if ($hasStopStrings && $this->endsWithStopString($generatedText, $config->stopStrings)) {
                     $generatedText = $this->trimStopStrings($generatedText, $config->stopStrings);
@@ -516,6 +542,204 @@ final class LlamaSession implements SessionInterface
         }
 
         return $text;
+    }
+
+    private function initializeMultimodalContext(): void
+    {
+        $projectorPath = $this->model->multimodalProjectorPath();
+        if ($projectorPath === null) {
+            return;
+        }
+
+        $ffi = $this->library->ffi();
+        $params = $ffi->mtmd_context_params_default();
+        $params->use_gpu = $this->model->multimodalProjectorUseGpu();
+        $params->print_timings = false;
+        $params->n_threads = $this->options->threads;
+        $params->flash_attn_type = $this->options->flashAttention ? 1 : 0;
+        $params->warmup = false;
+
+        $context = $ffi->mtmd_init_from_file($projectorPath, $this->model->modelHandle(), $params);
+        if ($context === null || $this->library->isNull($context)) {
+            throw new BackendException(sprintf('Failed to initialize multimodal projector "%s".', $projectorPath));
+        }
+
+        $this->multimodalContext = $context;
+
+        $marker = $ffi->mtmd_default_marker();
+        if (is_string($marker) && $marker !== '') {
+            $this->mediaMarker = $marker;
+        } elseif ($marker instanceof CData && !$this->library->isNull($marker)) {
+            $resolvedMarker = $this->library->string($marker);
+            if ($resolvedMarker !== '') {
+                $this->mediaMarker = $resolvedMarker;
+            }
+        }
+
+        $this->library->logger()->info('Initialized multimodal projector for session.', [
+            'multimodal_projector_path' => $projectorPath,
+            'supports_vision' => $ffi->mtmd_support_vision($context),
+            'supports_audio' => $ffi->mtmd_support_audio($context),
+            'media_marker' => $this->mediaMarker,
+        ]);
+    }
+
+    private function evaluatePrompt(GenerationConfig $config): PromptEvaluationResult
+    {
+        if ($config->prompt === null) {
+            throw new BackendException('Prompt evaluation requires a prompt string.');
+        }
+
+        if ($config->mediaInputs === []) {
+            return $this->evaluate($config->prompt, $config->addSpecial, $config->parseSpecial);
+        }
+
+        if ($this->multimodalContext === null || $this->library->isNull($this->multimodalContext)) {
+            throw new BackendException('This session was not initialized with a multimodal projector, so media inputs are not supported.');
+        }
+
+        if ($config->mediaMarker !== null && $config->mediaMarker !== $this->mediaMarker) {
+            throw new BackendException(sprintf(
+                'This session expects media marker "%s", but generation config requested "%s".',
+                $this->mediaMarker,
+                $config->mediaMarker,
+            ));
+        }
+
+        $this->assertMediaMarkerCountMatchesPrompt($config, $this->mediaMarker);
+
+        return $this->evaluateMultimodalPrompt($config);
+    }
+
+    private function evaluateMultimodalPrompt(GenerationConfig $config): PromptEvaluationResult
+    {
+        $ffi = $this->library->ffi();
+        $start = hrtime(true);
+
+        $promptBuffer = $this->toCString($config->prompt ?? '');
+        $inputText = $this->library->new('mtmd_input_text');
+        $inputText->text = $this->library->cast('char *', $promptBuffer);
+        $inputText->add_special = $config->addSpecial;
+        $inputText->parse_special = $config->parseSpecial;
+
+        $bitmapCount = count($config->mediaInputs);
+        $bitmapPointers = $this->library->new(sprintf('struct mtmd_bitmap *[%d]', max($bitmapCount, 1)));
+        $pathBuffers = [];
+        $idBuffers = [];
+        $bitmaps = [];
+
+        try {
+            foreach ($config->mediaInputs as $index => $mediaInput) {
+                $pathBuffers[$index] = $this->toCString($mediaInput->path);
+                $bitmap = $ffi->mtmd_helper_bitmap_init_from_file(
+                    $this->multimodalContext,
+                    $this->library->cast('char *', $pathBuffers[$index]),
+                );
+
+                if ($bitmap === null || $this->library->isNull($bitmap)) {
+                    throw new BackendException(sprintf('Failed to load media input "%s".', $mediaInput->path));
+                }
+
+                if ($mediaInput->id !== null) {
+                    $idBuffers[$index] = $this->toCString($mediaInput->id);
+                    $ffi->mtmd_bitmap_set_id($bitmap, $this->library->cast('char *', $idBuffers[$index]));
+                }
+
+                $bitmaps[$index] = $bitmap;
+                $bitmapPointers[$index] = $bitmap;
+            }
+
+            $chunks = $ffi->mtmd_input_chunks_init();
+            if ($chunks === null || $this->library->isNull($chunks)) {
+                throw new BackendException('Failed to initialize multimodal input chunks.');
+            }
+
+            try {
+                $tokenizeStatus = $ffi->mtmd_tokenize(
+                    $this->multimodalContext,
+                    $chunks,
+                    $this->library->addr($inputText),
+                    $bitmapPointers,
+                    $bitmapCount,
+                );
+                if ($tokenizeStatus !== 0) {
+                    throw new BackendException(sprintf('Multimodal prompt tokenization failed with status %d.', $tokenizeStatus));
+                }
+
+                $newPast = $this->library->new('llama_pos[1]');
+                $status = $ffi->mtmd_helper_eval_chunks(
+                    $this->multimodalContext,
+                    $this->context,
+                    $chunks,
+                    $this->historyPositionCount,
+                    0,
+                    $this->options->batchSize,
+                    true,
+                    $newPast,
+                );
+                if ($status !== 0) {
+                    throw new BackendException(sprintf('Multimodal prompt evaluation failed with status %d.', $status));
+                }
+
+                $tokenCount = (int) $ffi->mtmd_helper_get_n_tokens($chunks);
+                $durationUs = (int) ((hrtime(true) - $start) / 1_000);
+                $this->historyPositionCount = (int) $newPast[0];
+                $this->containsMultimodalPromptState = true;
+
+                $this->library->logger()->debug('Evaluated multimodal prompt.', [
+                    'prompt_tokens' => $tokenCount,
+                    'media_inputs' => $bitmapCount,
+                    'duration_us' => $durationUs,
+                    'media_marker' => $this->mediaMarker,
+                ]);
+
+                return new PromptEvaluationResult([], $tokenCount, $durationUs);
+            } finally {
+                $ffi->mtmd_input_chunks_free($chunks);
+            }
+        } finally {
+            foreach ($bitmaps as $bitmap) {
+                if ($bitmap !== null && !$this->library->isNull($bitmap)) {
+                    $ffi->mtmd_bitmap_free($bitmap);
+                }
+            }
+        }
+    }
+
+    private function toCString(string $value): CData
+    {
+        $buffer = $this->library->new(sprintf('char[%d]', strlen($value) + 1));
+        if ($value !== '') {
+            $this->library->memcpy($buffer, $value, strlen($value));
+        }
+        $buffer[strlen($value)] = "\0";
+
+        return $buffer;
+    }
+
+    private function assertMediaMarkerCountMatchesPrompt(GenerationConfig $config, string $mediaMarker): void
+    {
+        $prompt = $config->prompt ?? '';
+        $markerCount = substr_count($prompt, $mediaMarker);
+        $mediaCount = count($config->mediaInputs);
+
+        if ($markerCount !== $mediaCount) {
+            throw new BackendException(sprintf(
+                'Multimodal prompt must contain exactly %d "%s" marker(s); found %d.',
+                $mediaCount,
+                $mediaMarker,
+                $markerCount,
+            ));
+        }
+    }
+
+    private function assertSerializedStateSupported(bool $containsMultimodalPromptState): void
+    {
+        if ($containsMultimodalPromptState && RuntimePlatform::osFamily() === 'Darwin') {
+            throw new BackendException(
+                'Serialized snapshot/restore is not supported after multimodal prompt evaluation on the current Darwin/Metal llama.cpp path. Use reset() and continue within the same live session instead.',
+            );
+        }
     }
 
     private function assertOpen(): void

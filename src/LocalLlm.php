@@ -34,12 +34,16 @@ final class LocalLlm
         ?LoggerInterface $logger = null,
         bool $captureNativeLogs = true,
         string $nativeLogLevel = LogLevel::WARNING,
+        ?string $multimodalProjectorPath = null,
+        bool $multimodalProjectorUseGpu = true,
     ): LlamaRuntime {
         return LlamaRuntime::fromModelPath(
             modelPath: $modelPath,
             libraryPath: $libraryPath,
             gpuLayers: $gpuLayers ?? RuntimePlatform::defaultGpuLayers(),
             sessionOptions: $sessionOptions,
+            multimodalProjectorPath: $multimodalProjectorPath,
+            multimodalProjectorUseGpu: $multimodalProjectorUseGpu,
             chatFormatter: $chatFormatter,
             logger: $logger,
             captureNativeLogs: $captureNativeLogs,
@@ -56,12 +60,16 @@ final class LocalLlm
         ?LoggerInterface $logger = null,
         bool $captureNativeLogs = true,
         string $nativeLogLevel = LogLevel::WARNING,
+        ?string $multimodalProjectorPath = null,
+        bool $multimodalProjectorUseGpu = true,
     ): LlamaRuntime {
         return LlamaRuntime::fromOllamaModel(
             ollamaModel: $ollamaModel,
             libraryPath: $libraryPath,
             gpuLayers: $gpuLayers ?? RuntimePlatform::defaultGpuLayers(),
             sessionOptions: $sessionOptions,
+            multimodalProjectorPath: $multimodalProjectorPath,
+            multimodalProjectorUseGpu: $multimodalProjectorUseGpu,
             chatFormatter: $chatFormatter,
             logger: $logger,
             captureNativeLogs: $captureNativeLogs,

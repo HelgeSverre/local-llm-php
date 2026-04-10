@@ -5,7 +5,9 @@ declare(strict_types=1);
 namespace HelgeSverre\LocalLlm\Tests\Unit;
 
 use Generator;
+use HelgeSverre\LocalLlm\Backend\BackendException;
 use HelgeSverre\LocalLlm\Backend\ChatTemplateAwareModelInterface;
+use HelgeSverre\LocalLlm\Backend\MediaAwareSessionInterface;
 use HelgeSverre\LocalLlm\Backend\ModelMetadata;
 use HelgeSverre\LocalLlm\Backend\SessionInterface;
 use HelgeSverre\LocalLlm\Chat\ChatMessage;
@@ -14,6 +16,7 @@ use HelgeSverre\LocalLlm\Chat\ChatSession;
 use HelgeSverre\LocalLlm\Generation\GenerationConfig;
 use HelgeSverre\LocalLlm\Generation\GenerationProfile;
 use HelgeSverre\LocalLlm\Generation\GenerationResult;
+use HelgeSverre\LocalLlm\Generation\MediaInput;
 use HelgeSverre\LocalLlm\Generation\PromptEvaluationResult;
 use HelgeSverre\LocalLlm\Generation\SessionState;
 use HelgeSverre\LocalLlm\Tokenizer\TokenizationResult;
@@ -127,6 +130,57 @@ final class ChatSessionTest extends TestCase
         self::assertSame('warning', $logger->records[0]['level']);
         self::assertSame('native_fallback_generic', $logger->records[1]['context']['template_mode']);
     }
+
+    public function testGeneratePropagatesMessageMediaInputsAndInjectsMarkers(): void
+    {
+        $model = new FakeChatTemplateAwareModel();
+        $session = new FakeMediaAwareSession('<native-media>');
+        $chatSession = new ChatSession($model, $session);
+
+        $chatSession->generate(
+            [ChatMessage::userWithMedia('Describe this image.', [MediaInput::fromFile('/tmp/example.png')])],
+            new GenerationConfig(maxTokens: 4, temperature: 0.0),
+        );
+
+        self::assertNotNull($session->lastConfig);
+        self::assertCount(1, $session->lastConfig->mediaInputs);
+        self::assertStringContainsString('<native-media>', $session->lastPrompt ?? '');
+    }
+
+    public function testPromptOverrideRejectsMessageAttachedMediaInputs(): void
+    {
+        $model = new FakeChatTemplateAwareModel();
+        $session = new FakeSession();
+        $chatSession = new ChatSession($model, $session);
+
+        $this->expectException(BackendException::class);
+        $this->expectExceptionMessage('Chat message media inputs cannot be combined with prompt override.');
+
+        $chatSession->generate(
+            [ChatMessage::userWithMedia('Describe this image.', [MediaInput::fromFile('/tmp/example.png')])],
+            new GenerationConfig(maxTokens: 4, temperature: 0.0),
+            options: new ChatOptions(promptOverride: 'RAW PROMPT'),
+        );
+    }
+
+    public function testMixingMessageMediaInputsAndGenerationConfigMediaInputsFails(): void
+    {
+        $model = new FakeChatTemplateAwareModel();
+        $session = new FakeSession();
+        $chatSession = new ChatSession($model, $session);
+
+        $this->expectException(BackendException::class);
+        $this->expectExceptionMessage('Attach media inputs either to chat messages or to GenerationConfig');
+
+        $chatSession->generate(
+            [ChatMessage::userWithMedia('Describe this image.', [MediaInput::fromFile('/tmp/example.png')])],
+            new GenerationConfig(
+                maxTokens: 4,
+                temperature: 0.0,
+                mediaInputs: [MediaInput::fromFile('/tmp/other.png')],
+            ),
+        );
+    }
 }
 
 class FakeChatTemplateAwareModel implements ChatTemplateAwareModelInterface
@@ -170,9 +224,7 @@ class FakeChatTemplateAwareModel implements ChatTemplateAwareModelInterface
         return new FakeSession();
     }
 
-    public function close(): void
-    {
-    }
+    public function close(): void {}
 
     public function defaultChatTemplate(): ?string
     {
@@ -185,15 +237,16 @@ class FakeChatTemplateAwareModel implements ChatTemplateAwareModelInterface
         $this->lastAddAssistantTurn = $addAssistantTurn;
 
         return 'NATIVE_TEMPLATE:template=' . ($template ?? 'default') . ':add_assistant=' . ($addAssistantTurn ? '1' : '0') . ':' . implode('|', array_map(
-            static fn (ChatMessage $message): string => $message->role . '=' . $message->content,
+            static fn(ChatMessage $message): string => $message->role . '=' . $message->content,
             $messages,
         ));
     }
 }
 
-final class FakeSession implements SessionInterface
+class FakeSession implements SessionInterface
 {
     public ?string $lastPrompt = null;
+    public ?GenerationConfig $lastConfig = null;
 
     public function evaluate(string|array $prompt, bool $addSpecial = true, bool $parseSpecial = true): PromptEvaluationResult
     {
@@ -203,6 +256,7 @@ final class FakeSession implements SessionInterface
     public function generate(GenerationConfig $config, ?callable $onToken = null): GenerationResult
     {
         $this->lastPrompt = $config->prompt;
+        $this->lastConfig = $config;
 
         return new GenerationResult(
             text: '',
@@ -216,9 +270,7 @@ final class FakeSession implements SessionInterface
 
     public function stream(GenerationConfig $config): Generator
     {
-        if (false) {
-            yield null;
-        }
+        yield from [];
     }
 
     public function snapshot(): SessionState
@@ -226,16 +278,22 @@ final class FakeSession implements SessionInterface
         return new SessionState('', []);
     }
 
-    public function restore(SessionState $state): void
-    {
-    }
+    public function restore(SessionState $state): void {}
 
-    public function reset(bool $clearStateData = true): void
-    {
-    }
+    public function reset(bool $clearStateData = true): void {}
 
-    public function close(): void
+    public function close(): void {}
+}
+
+final class FakeMediaAwareSession extends FakeSession implements MediaAwareSessionInterface
+{
+    public function __construct(
+        private readonly ?string $marker,
+    ) {}
+
+    public function mediaMarker(): ?string
     {
+        return $this->marker;
     }
 }
 

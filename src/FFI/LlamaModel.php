@@ -234,6 +234,16 @@ final class LlamaModel implements ModelInterface, ChatTemplateAwareModelInterfac
         return $this->vocab;
     }
 
+    public function multimodalProjectorPath(): ?string
+    {
+        return $this->options->multimodalProjectorPath;
+    }
+
+    public function multimodalProjectorUseGpu(): bool
+    {
+        return $this->options->multimodalProjectorUseGpu;
+    }
+
     private function assertOpen(): void
     {
         if ($this->closed) {
@@ -313,7 +323,9 @@ final class LlamaModel implements ModelInterface, ChatTemplateAwareModelInterfac
         }
 
         foreach ($messages as $message) {
-            if ($message->content !== '' && !str_contains($formatted, $message->content)) {
+            $expectedContent = $message->content;
+
+            if ($expectedContent !== '' && !str_contains($formatted, $expectedContent)) {
                 if ($cacheResult) {
                     $this->nativeChatTemplateHealthy = false;
                 }

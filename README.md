@@ -13,7 +13,7 @@ This package is intentionally separate from the ONNX Runtime PHP package. The go
 - Streaming token callbacks: implemented.
 - Prompt eval, decode, and end-to-end profiling: implemented.
 - Session reset and in-memory context reuse: implemented.
-- Full session snapshot and restore: exposed experimentally, but not yet qualified as stable on this Metal setup.
+- Full session snapshot and restore: exposed experimentally, but not yet qualified as stable on this Metal setup. Multimodal prompt state is now rejected explicitly on the current Darwin/Metal path instead of being left as a native crash path.
 - Benchmark harness against local Ollama: implemented.
 
 ## Documentation
@@ -159,6 +159,38 @@ $rawOverride = $chat->generate(
 );
 ```
 
+Split multimodal models are supported when the text GGUF and `mmproj` live as separate files:
+
+```php
+<?php
+
+use HelgeSverre\LocalLlm\Chat\ChatMessage;
+use HelgeSverre\LocalLlm\Generation\GenerationConfig;
+use HelgeSverre\LocalLlm\Generation\MediaInput;
+use HelgeSverre\LocalLlm\LocalLlm;
+
+$runtime = LocalLlm::llamaCppRuntime(
+    modelPath: '/absolute/path/to/model.gguf',
+    multimodalProjectorPath: '/absolute/path/to/mmproj.gguf',
+);
+
+$chat = $runtime->newChatSession();
+
+$result = $chat->generate(
+    [
+        ChatMessage::userWithMedia(
+            'Describe this image in one sentence.',
+            [MediaInput::fromFile('/absolute/path/to/image.jpg')],
+        ),
+    ],
+    new GenerationConfig(maxTokens: 64, temperature: 0.0),
+);
+```
+
+For the high-level chat API, attach media directly to `ChatMessage` instances. For raw prompt-style multimodal requests, use `GenerationConfig->mediaInputs` on a low-level session with an explicit prompt that already contains the required media markers. Do not mix message-attached media and `GenerationConfig->mediaInputs` in the same chat request.
+
+Serialized `snapshot()` / `restore()` is currently blocked after multimodal prompt evaluation on the current Darwin/Metal runtime because upstream/native state restoration is not stable there yet. Use `reset()` and re-evaluate the prompt, or continue generation in the same live session.
+
 ## Structured logging
 
 The runtime accepts any PSR-3 logger. The package does not force Monolog, but Monolog works well if you want structured JSON or file logging.
@@ -258,7 +290,17 @@ Useful package tuning flags:
 
 ```bash
 cd /Users/helge/code/local-llm-php
-./vendor/bin/phpunit --testsuite unit
+composer check
+```
+
+That runs Composer metadata validation, `phpstan`, `php-cs-fixer` in check mode, and the unit suite.
+
+You can also run the quality gates individually:
+
+```bash
+composer analyse
+composer format:check
+composer test:unit
 ```
 
 Clean-slate Linux install verification is included as a Docker smoke test:
@@ -281,20 +323,45 @@ php -d ffi.enable=1 ./vendor/bin/phpunit --testsuite integration
 
 On macOS use your `libllama.dylib` path instead. If your custom build does not embed a relative runtime search path, also export `DYLD_LIBRARY_PATH` or `LD_LIBRARY_PATH` accordingly.
 
+For the split multimodal integration path, add these as well:
+
+```bash
+export LOCAL_LLM_FFI_MM_MODEL=/absolute/path/to/multimodal-model.gguf
+export LOCAL_LLM_FFI_MM_MMPROJ=/absolute/path/to/mmproj.gguf
+export LOCAL_LLM_FFI_MM_IMAGE=/absolute/path/to/test-image.png
+```
+
+For multimodal runs, `LOCAL_LLM_FFI_LLAMA_LIB` must either point directly to `libmtmd`, or to a `libllama` that has the matching `libmtmd` sidecar in the same directory.
+
 The integration suite now covers:
 
 - chat-session formatting sanity on real models
 - stream chunk reconstruction versus generated final text
 - reset and deterministic reuse
 - long-prompt chunking with small `n_batch`
+- split multimodal prompt evaluation through both chat-session and low-level session APIs
+- split multimodal chat streaming versus non-streaming generation
+- split multimodal chat-layer rejection paths for invalid media binding
+- prompt-only multimodal evaluation followed by continued generation from the same session
+- explicit rejection of serialized multimodal snapshot/restore on the current Darwin/Metal path
 - clean failure paths for missing prompt state and invalid model paths
+
+For local real-image multimodal sanity checks, you can also run:
+
+```bash
+LOCAL_LLM_FFI_LLAMA_LIB=/absolute/path/to/libllama.dylib \
+LOCAL_LLM_FFI_MM_MODEL=/absolute/path/to/model.gguf \
+LOCAL_LLM_FFI_MM_MMPROJ=/absolute/path/to/mmproj.gguf \
+LOCAL_LLM_FFI_MM_ANIMAL_MANIFEST=/absolute/path/to/manifest.json \
+php -d ffi.enable=1 scripts/verify-multimodal-animals.php
+```
 
 ## Limitations
 
 - The strongest benchmark and tuning data is still on Apple Silicon. Linux is currently a validated build/runtime path, not yet a benchmarked parity target.
 - The package is intentionally focused on `llama.cpp`; no second backend is planned right now.
 - Linux support is currently CPU-first. If you need GPU acceleration on Linux, that is a separate qualification track.
-- Full serialized session-state export/import still needs more validation under the current `llama.cpp` Metal path.
+- Full serialized session-state export/import still needs more validation under the current `llama.cpp` Metal path, and multimodal prompt state is rejected explicitly there for now.
 - The package now suppresses the common `llama.cpp` and `ggml` callback-driven native stderr path by routing it through PSR-3, but some direct upstream `fprintf(stderr, ...)` paths may still escape.
 - Cold process startup still includes PHP startup, FFI binding setup, and model load; a persistent worker model will amortize that better than short-lived CLI runs.
 - Vendor dependencies and native build outputs are intentionally ignored by Git and are generated locally.

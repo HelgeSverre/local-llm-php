@@ -7,6 +7,7 @@ namespace HelgeSverre\LocalLlm\FFI;
 use FFI;
 use FFI\CData;
 use HelgeSverre\LocalLlm\Backend\BackendException;
+use HelgeSverre\LocalLlm\Support\RuntimePlatform;
 use Psr\Log\LoggerInterface;
 
 final class LlamaLibrary
@@ -23,13 +24,16 @@ final class LlamaLibrary
             throw new BackendException(sprintf('llama.cpp library not found at "%s".', $config->libraryPath));
         }
 
+        $ffiLibraryPath = $this->resolveFfiLibraryPath($config->libraryPath);
+
         $config->logger->debug('Binding llama.cpp FFI library.', [
             'library_path' => $config->libraryPath,
+            'ffi_library_path' => $ffiLibraryPath,
             'load_dynamic_backends' => $config->loadDynamicBackends,
             'initialize_backend' => $config->initializeBackend,
         ]);
 
-        $this->ffi = FFI::cdef(LlamaCdef::definitions(), $config->libraryPath);
+        $this->ffi = FFI::cdef(LlamaCdef::definitions(), $ffiLibraryPath);
         $this->installNativeLogRouting();
 
         if ($config->loadDynamicBackends && $this->hasFunction('ggml_backend_load_all')) {
@@ -134,5 +138,16 @@ final class LlamaLibrary
         } catch (\Throwable) {
             return false;
         }
+    }
+
+    private function resolveFfiLibraryPath(string $libraryPath): string
+    {
+        if (basename($libraryPath) === RuntimePlatform::multimodalSharedLibraryBasename()) {
+            return $libraryPath;
+        }
+
+        $candidate = dirname($libraryPath) . '/' . RuntimePlatform::multimodalSharedLibraryBasename();
+
+        return is_file($candidate) ? $candidate : $libraryPath;
     }
 }
