@@ -144,23 +144,8 @@ final class LlamaSession implements SessionInterface, MediaAwareSessionInterface
 
     public function generate(GenerationConfig $config, ?callable $onToken = null): GenerationResult
     {
-        $this->assertOpen();
-
+        $promptEvaluation = $this->prepareGeneration($config);
         $ffi = $this->library->ffi();
-        $ffi->llama_perf_context_reset($this->context);
-
-        if ($config->prompt === null && $config->mediaInputs !== []) {
-            throw new BackendException('Media inputs require a prompt string in the current generation call.');
-        }
-
-        $promptEvaluation = null;
-        if ($config->prompt !== null) {
-            $promptEvaluation = $this->evaluatePrompt($config);
-        }
-
-        if ($this->historyPositionCount === 0) {
-            throw new BackendException('Generation requires a prompt or a previously evaluated session state.');
-        }
 
         $sampler = $this->buildSampler($config);
         try {
@@ -347,23 +332,8 @@ final class LlamaSession implements SessionInterface, MediaAwareSessionInterface
      */
     private function runGeneration(GenerationConfig $config): Generator
     {
-        $this->assertOpen();
-
+        $promptEvaluation = $this->prepareGeneration($config);
         $ffi = $this->library->ffi();
-        $ffi->llama_perf_context_reset($this->context);
-
-        if ($config->prompt === null && $config->mediaInputs !== []) {
-            throw new BackendException('Media inputs require a prompt string in the current generation call.');
-        }
-
-        $promptEvaluation = null;
-        if ($config->prompt !== null) {
-            $promptEvaluation = $this->evaluatePrompt($config);
-        }
-
-        if ($this->historyPositionCount === 0) {
-            throw new BackendException('Generation requires a prompt or a previously evaluated session state.');
-        }
 
         $sampler = $this->buildSampler($config);
         try {
@@ -542,6 +512,29 @@ final class LlamaSession implements SessionInterface, MediaAwareSessionInterface
         }
 
         return $text;
+    }
+
+    private function prepareGeneration(GenerationConfig $config): ?PromptEvaluationResult
+    {
+        $this->assertOpen();
+
+        $ffi = $this->library->ffi();
+        $ffi->llama_perf_context_reset($this->context);
+
+        if ($config->prompt === null && $config->mediaInputs !== []) {
+            throw new BackendException('Media inputs require a prompt string in the current generation call.');
+        }
+
+        $promptEvaluation = null;
+        if ($config->prompt !== null) {
+            $promptEvaluation = $this->evaluatePrompt($config);
+        }
+
+        if ($this->historyPositionCount === 0) {
+            throw new BackendException('Generation requires a prompt or a previously evaluated session state.');
+        }
+
+        return $promptEvaluation;
     }
 
     private function initializeMultimodalContext(): void
