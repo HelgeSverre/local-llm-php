@@ -57,7 +57,7 @@ final class LlamaRuntimeIntegrationTest extends TestCase
             self::assertNotSame('', $streamed);
             self::assertSame($generated->text, $streamed);
             self::assertSame($generated->text, implode('', array_map(
-                static fn ($chunk): string => $chunk->text,
+                static fn($chunk): string => $chunk->text,
                 $generated->chunks,
             )));
         } finally {

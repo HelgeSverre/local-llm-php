@@ -7,7 +7,7 @@ namespace HelgeSverre\LocalLlm\Backend;
 final readonly class SessionOptions
 {
     /**
-     * @param array<string, scalar|array|null> $backendOptions
+     * @param array<string, mixed> $backendOptions
      */
     public function __construct(
         public int $contextTokens = 4096,

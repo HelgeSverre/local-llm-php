@@ -11,8 +11,7 @@ final readonly class TokenizationResult
      */
     public function __construct(
         public array $tokens,
-    ) {
-    }
+    ) {}
 
     public function count(): int
     {

@@ -16,8 +16,7 @@ final readonly class GenerationProfile
         public float $nativeDecodeMs,
         public float $nativeSampleMs,
         public int $nativeGraphReuseCount,
-    ) {
-    }
+    ) {}
 
     public function promptTokensPerSecond(): float
     {

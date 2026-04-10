@@ -17,6 +17,5 @@ final readonly class LlamaBackendConfig
         public LoggerInterface $logger = new NullLogger(),
         public bool $captureNativeLogs = true,
         public string $nativeLogLevel = LogLevel::WARNING,
-    ) {
-    }
+    ) {}
 }

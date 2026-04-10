@@ -4,8 +4,8 @@ declare(strict_types=1);
 
 namespace HelgeSverre\LocalLlm\Tests\Unit;
 
-use InvalidArgumentException;
 use HelgeSverre\LocalLlm\Backend\SessionOptions;
+use InvalidArgumentException;
 use PHPUnit\Framework\TestCase;
 
 final class SessionOptionsTest extends TestCase

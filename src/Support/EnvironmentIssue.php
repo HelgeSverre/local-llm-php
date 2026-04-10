@@ -9,8 +9,7 @@ final readonly class EnvironmentIssue
     public function __construct(
         public string $severity,
         public string $message,
-    ) {
-    }
+    ) {}
 
     public function isBlocking(): bool
     {

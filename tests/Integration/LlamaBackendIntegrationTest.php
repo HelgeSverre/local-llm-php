@@ -4,8 +4,8 @@ declare(strict_types=1);
 
 namespace HelgeSverre\LocalLlm\Tests\Integration;
 
-use HelgeSverre\LocalLlm\Backend\ChatTemplateAwareModelInterface;
 use HelgeSverre\LocalLlm\Backend\BackendException;
+use HelgeSverre\LocalLlm\Backend\ChatTemplateAwareModelInterface;
 use HelgeSverre\LocalLlm\Backend\ModelOptions;
 use HelgeSverre\LocalLlm\Backend\SessionOptions;
 use HelgeSverre\LocalLlm\Chat\ChatMessage;

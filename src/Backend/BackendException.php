@@ -6,6 +6,4 @@ namespace HelgeSverre\LocalLlm\Backend;
 
 use RuntimeException;
 
-class BackendException extends RuntimeException
-{
-}
+class BackendException extends RuntimeException {}

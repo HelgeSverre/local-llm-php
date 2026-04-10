@@ -26,11 +26,20 @@ jobs:
 
       - uses: ramsey/composer-install@v3
 
+      - name: Composer validate
+        run: composer validate --strict
+
+      - name: PHP CS Fixer
+        run: composer format:check
+
+      - name: PHPStan
+        run: composer analyse
+
       - name: Build llama.cpp
         run: ./scripts/build-llama-cpp.sh
 
       - name: Unit tests
-        run: ./vendor/bin/phpunit --testsuite unit
+        run: composer test:unit
 
       - name: Doctor smoke
         run: php -d ffi.enable=1 ./bin/doctor

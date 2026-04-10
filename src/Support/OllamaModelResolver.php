@@ -10,8 +10,7 @@ final readonly class OllamaModelResolver
 {
     public function __construct(
         private string $ollamaBinary = 'ollama',
-    ) {
-    }
+    ) {}
 
     public function resolveBlobPath(string $modelName): string
     {

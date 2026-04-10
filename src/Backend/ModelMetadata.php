@@ -17,6 +17,5 @@ final readonly class ModelMetadata
         public int $headCount,
         public int $parameterCount,
         public int $modelSizeBytes,
-    ) {
-    }
+    ) {}
 }

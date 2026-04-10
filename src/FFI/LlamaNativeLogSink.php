@@ -22,8 +22,7 @@ final class LlamaNativeLogSink
     public function __construct(
         private readonly LoggerInterface $logger,
         private readonly string $minimumLevel = LogLevel::WARNING,
-    ) {
-    }
+    ) {}
 
     public function consume(int $level, string $text): void
     {

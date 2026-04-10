@@ -11,6 +11,5 @@ final readonly class TokenChunk
         public string $text,
         public int $index,
         public int $elapsedUs,
-    ) {
-    }
+    ) {}
 }

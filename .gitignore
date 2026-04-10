@@ -1,6 +1,9 @@
 /vendor/
 /.phpunit.cache/
 /.DS_Store
+/.php-cs-fixer.cache
+/.phpstan/
+/var/models/
 /var/results/
 /var/native/llama.cpp/
 /var/native/*.tar.gz

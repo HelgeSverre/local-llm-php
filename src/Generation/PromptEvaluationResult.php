@@ -13,8 +13,7 @@ final readonly class PromptEvaluationResult
         public array $tokenIds,
         public int $tokenCount,
         public int $durationUs,
-    ) {
-    }
+    ) {}
 
     public function tokensPerSecond(): float
     {

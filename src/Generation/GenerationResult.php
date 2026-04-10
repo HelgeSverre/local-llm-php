@@ -17,6 +17,5 @@ final readonly class GenerationResult
         public string $finishReason,
         public ?PromptEvaluationResult $promptEvaluation,
         public GenerationProfile $profile,
-    ) {
-    }
+    ) {}
 }

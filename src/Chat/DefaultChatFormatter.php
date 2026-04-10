@@ -11,8 +11,7 @@ final class DefaultChatFormatter implements ChatFormatterInterface
 {
     public function __construct(
         private readonly ChatFormatterInterface $fallback = new GenericChatFormatter(),
-    ) {
-    }
+    ) {}
 
     public function format(array $messages, ModelInterface $model, ChatOptions $options): string
     {

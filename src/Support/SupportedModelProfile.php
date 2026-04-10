@@ -58,7 +58,7 @@ final readonly class SupportedModelProfile
     public function supportedTiers(): array
     {
         return array_map(
-            static fn (AppleSiliconPreset $preset): AppleSiliconTier => $preset->tier,
+            static fn(AppleSiliconPreset $preset): AppleSiliconTier => $preset->tier,
             array_values($this->presets),
         );
     }

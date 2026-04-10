@@ -14,8 +14,7 @@ final readonly class EnvironmentReport
     public function __construct(
         public string $libraryPath,
         public array $issues,
-    ) {
-    }
+    ) {}
 
     public function hasBlockingIssues(): bool
     {
@@ -35,7 +34,7 @@ final readonly class EnvironmentReport
     {
         return array_values(array_filter(
             $this->issues,
-            static fn (EnvironmentIssue $issue): bool => $issue->isBlocking(),
+            static fn(EnvironmentIssue $issue): bool => $issue->isBlocking(),
         ));
     }
 
@@ -46,7 +45,7 @@ final readonly class EnvironmentReport
     {
         return array_values(array_filter(
             $this->issues,
-            static fn (EnvironmentIssue $issue): bool => !$issue->isBlocking(),
+            static fn(EnvironmentIssue $issue): bool => !$issue->isBlocking(),
         ));
     }
 
@@ -57,7 +56,7 @@ final readonly class EnvironmentReport
         }
 
         $messages = array_map(
-            static fn (EnvironmentIssue $issue): string => $issue->message,
+            static fn(EnvironmentIssue $issue): string => $issue->message,
             $this->blockingIssues(),
         );
 

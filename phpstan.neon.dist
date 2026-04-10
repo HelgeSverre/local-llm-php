@@ -1,0 +1,18 @@
+parameters:
+  level: 6
+  paths:
+    - src
+    - tests
+  tmpDir: .phpstan
+  excludePaths:
+    analyse:
+      - tests/Benchmarks/*
+  ignoreErrors:
+    - message: '#^Call to an undefined method FFI::[A-Za-z0-9_]+\(\)\.$#'
+      path: src/FFI/*
+    - message: '#^Access to an undefined property FFI\\CData::\$[A-Za-z0-9_]+\.$#'
+      path: src/FFI/*
+    - message: '#^Expression "\$this->ffi->\{\$function\}" on a separate line does not do anything\.$#'
+      path: src/FFI/LlamaLibrary.php
+    - message: '#^Dead catch - Throwable is never thrown in the try block\.$#'
+      path: src/FFI/LlamaLibrary.php

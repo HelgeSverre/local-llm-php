@@ -23,7 +23,7 @@ final class Statistics
             ];
         }
 
-        $numbers = array_map(static fn (float|int $value): float => (float) $value, $values);
+        $numbers = array_map(static fn(float|int $value): float => (float) $value, $values);
         sort($numbers);
 
         $count = count($numbers);
